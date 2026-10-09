@@ -18,8 +18,27 @@ export default function AIPanel() {
   const [chatInput, setChatInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+
+  const testConnection = async () => {
+    setConnectionStatus('testing');
+    try {
+      const endpoint = aiConfig.endpoint || 'http://localhost:11434';
+      const response = await fetch(`${endpoint}/api/tags`);
+      if (response.ok) {
+        setConnectionStatus('success');
+        setTimeout(() => setConnectionStatus('idle'), 2000);
+      } else {
+        setConnectionStatus('error');
+        setTimeout(() => setConnectionStatus('idle'), 2000);
+      }
+    } catch (error) {
+      setConnectionStatus('error');
+      setTimeout(() => setConnectionStatus('idle'), 2000);
+    }
+  };
 
   const handleSendMessage = async () => {
     if (!chatInput.trim()) return;
@@ -34,16 +53,91 @@ export default function AIPanel() {
     const userInput = chatInput;
     setChatInput('');
 
-    // Demo response
-    setTimeout(() => {
-      const response = generateDemoResponse(userInput, selectedNode);
+    // Demo mode fallback
+    if (aiConfig.provider === 'demo') {
+      setTimeout(() => {
+        const response = generateDemoResponse(userInput, selectedNode);
+        addChatMessage({
+          role: 'assistant',
+          content: response,
+          nodeId: selectedNodeId || undefined,
+        });
+        setIsTyping(false);
+      }, 1000);
+      return;
+    }
+
+    // Real API call
+    try {
+      const endpoint = aiConfig.endpoint || 'http://localhost:11434';
+      const model = aiConfig.model || 'llama2';
+      
+      // Build context from accessible sources
+      const accessibleSources = selectedNodeId 
+        ? useStore.getState().getAccessibleSources(selectedNodeId)
+        : [];
+      
+      let systemPrompt = aiConfig.systemPrompt || 'Ты — ИИ-ассистент для планирования задач.';
+      
+      if (selectedNode) {
+        systemPrompt += `\n\nКонтекст текущей задачи: "${selectedNode.label}" (${selectedNode.status})`;
+        if (selectedNode.description) {
+          systemPrompt += `\nОписание: ${selectedNode.description}`;
+        }
+        if (selectedNode.tags.length > 0) {
+          systemPrompt += `\nТеги: ${selectedNode.tags.join(', ')}`;
+        }
+        
+        if (accessibleSources.length > 0) {
+          systemPrompt += `\n\n📚 Доступные источники:`;
+          accessibleSources.slice(0, 5).forEach((item, idx) => {
+            systemPrompt += `\n${idx + 1}. "${item.source.title}" из "${item.taskLabel}" (вес: ${item.weight.toFixed(2)})`;
+            if (item.source.content) {
+              systemPrompt += `\n   ${item.source.content.substring(0, 300)}`;
+            }
+          });
+        }
+      }
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userInput }
+      ];
+
+      const response = await fetch(`${endpoint}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: false
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const assistantMessage = data.message?.content || 'Нет ответа от модели';
+
       addChatMessage({
         role: 'assistant',
-        content: response,
+        content: assistantMessage,
         nodeId: selectedNodeId || undefined,
       });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
+      addChatMessage({
+        role: 'assistant',
+        content: `❌ Ошибка подключения к ИИ: ${errorMessage}\n\nПроверьте:\n• Запущен ли Ollama\n• Правильность endpoint (${aiConfig.endpoint || 'http://localhost:11434'})\n• Наличие модели ${aiConfig.model || 'llama2'}`,
+        nodeId: selectedNodeId || undefined,
+      });
+    } finally {
       setIsTyping(false);
-    }, 1000);
+    }
   };
 
   const handleGenerateTask = () => {
@@ -116,6 +210,25 @@ export default function AIPanel() {
               <option value="custom">Custom endpoint</option>
             </select>
           </div>
+
+          {(aiConfig.provider === 'ollama' || aiConfig.provider === 'custom') && (
+            <button
+              onClick={testConnection}
+              disabled={connectionStatus === 'testing'}
+              className={`w-full px-2 py-1.5 rounded text-xs font-medium transition-all ${
+                connectionStatus === 'success'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50'
+                  : connectionStatus === 'error'
+                  ? 'bg-red-500/20 text-red-300 border border-red-400/50'
+                  : 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 hover:bg-cyan-500/30'
+              } disabled:opacity-50`}
+            >
+              {connectionStatus === 'testing' && '🔄 Проверка...'}
+              {connectionStatus === 'success' && '✅ Подключено'}
+              {connectionStatus === 'error' && '❌ Ошибка подключения'}
+              {connectionStatus === 'idle' && '🔌 Тест соединения'}
+            </button>
+          )}
 
           {aiConfig.provider !== 'demo' && (
             <>
