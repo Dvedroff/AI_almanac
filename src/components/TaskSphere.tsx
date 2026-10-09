@@ -104,6 +104,65 @@ export default function TaskSphere({ node }: TaskSphereProps) {
         </mesh>
       )}
 
+      {/* Cluster: multi-ring orbital */}
+      {node.status === 'cluster' && (
+        <>
+          <mesh rotation={[Math.PI / 3, 0.2, 0]}>
+            <ringGeometry args={[node.size * 1.3, node.size * 1.5, 48]} />
+            <meshBasicMaterial
+              color="#a855f7"
+              transparent
+              opacity={(hovered || isSelected ? 0.5 : 0.2) * opacity}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+          <mesh rotation={[-Math.PI / 4, 0.4, 0]}>
+            <ringGeometry args={[node.size * 1.6, node.size * 1.7, 48]} />
+            <meshBasicMaterial
+              color="#06b6d4"
+              transparent
+              opacity={(hovered || isSelected ? 0.4 : 0.15) * opacity}
+              side={THREE.DoubleSide}
+            />
+          </mesh>
+        </>
+      )}
+
+      {/* System: equatorial ring with glow */}
+      {node.status === 'system' && (
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[node.size * 1.4, node.size * 1.6, 64]} />
+          <meshBasicMaterial
+            color="#fbbf24"
+            transparent
+            opacity={(hovered || isSelected ? 0.7 : 0.35) * opacity}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+
+      {/* Comet: tail effect */}
+      {node.status === 'comet' && (
+        <group rotation={[0, 0, Math.PI / 4]}>
+          <mesh position={[node.size * -1.5, 0, 0]}>
+            <sphereGeometry args={[node.size * 0.3, 16, 16]} />
+            <meshBasicMaterial
+              color="#06b6d4"
+              transparent
+              opacity={(hovered || isSelected ? 0.5 : 0.2) * opacity}
+            />
+          </mesh>
+          <mesh position={[node.size * -2.5, 0, 0]}>
+            <sphereGeometry args={[node.size * 0.2, 12, 12]} />
+            <meshBasicMaterial
+              color="#22d3ee"
+              transparent
+              opacity={(hovered || isSelected ? 0.3 : 0.1) * opacity}
+            />
+          </mesh>
+        </group>
+      )}
+
       {/* Black hole effect */}
       {node.status === 'blackhole' && (
         <Sphere args={[node.size * 1.2, 32, 32]}>
@@ -143,9 +202,12 @@ export default function TaskSphere({ node }: TaskSphereProps) {
               <span className="text-xs">
                 {node.status === 'galaxy_center' ? '🌌' : 
                  node.status === 'star' ? '⭐' : 
+                 node.status === 'cluster' ? '🌟' : 
+                 node.status === 'system' ? '💫' : 
                  node.status === 'planet' ? '🪐' : 
                  node.status === 'satellite' ? '🛰️' : 
-                 node.status === 'blackhole' ? '🕳️' : '☄️'}
+                 node.status === 'comet' ? '☄️' : 
+                 node.status === 'blackhole' ? '🕳️' : '🪨'}
               </span>
               <span className="text-white text-xs font-medium">{node.label}</span>
             </div>

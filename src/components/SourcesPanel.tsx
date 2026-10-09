@@ -1,13 +1,21 @@
 import { useStore } from '../store';
-import { TaskNode } from '../types';
+import { TaskNode, Source } from '../types';
+import { useState } from 'react';
 
 interface SourcesPanelProps {
   selectedNode: TaskNode;
   updateNode: (id: string, data: Partial<TaskNode>) => void;
 }
 
+const SOURCE_TYPE_OPTIONS: { value: Source['type']; label: string; desc: string }[] = [
+  { value: 'text', label: '📝 Текст', desc: 'отправляется ИИ' },
+  { value: 'link', label: '🔗 Ссылка', desc: 'только метаданные' },
+  { value: 'file', label: '📄 Файл', desc: 'пока не поддерживается' },
+];
+
 export default function SourcesPanel({ selectedNode, updateNode }: SourcesPanelProps) {
   const getAccessibleSources = useStore((s) => s.getAccessibleSources);
+  const [newSourceType, setNewSourceType] = useState<Source['type']>('text');
   
   const accessibleSources = getAccessibleSources(selectedNode.id);
   
@@ -18,27 +26,42 @@ export default function SourcesPanel({ selectedNode, updateNode }: SourcesPanelP
   return (
     <div className="p-4 space-y-4">
       <div>
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between mb-2 gap-2">
           <h3 className="text-xs font-medium text-cyan-300">
             📎 Собственные источники ({ownSources.length})
           </h3>
-          <button
-            onClick={() => {
-              const newSource = {
-                id: crypto.randomUUID(),
-                type: 'text' as const,
-                title: `Заметка ${selectedNode.sources.length + 1}`,
-                content: '',
-                addedAt: new Date().toISOString(),
-              };
-              updateNode(selectedNode.id, {
-                sources: [...selectedNode.sources, newSource],
-              });
-            }}
-            className="px-2 py-1 bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded text-[10px] font-medium hover:bg-cyan-500/30 transition-colors"
-          >
-            + Добавить
-          </button>
+          <div className="flex items-center gap-1.5">
+            <select
+              value={newSourceType}
+              onChange={(e) => setNewSourceType(e.target.value as Source['type'])}
+              className="px-2 py-1 bg-black/40 border border-cyan-500/30 rounded text-[10px] text-white outline-none"
+            >
+              {SOURCE_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => {
+                const newSource: Source = {
+                  id: crypto.randomUUID(),
+                  type: newSourceType,
+                  title: newSourceType === 'link'
+                    ? `Ссылка ${selectedNode.sources.length + 1}`
+                    : newSourceType === 'file'
+                    ? `Файл ${selectedNode.sources.length + 1}`
+                    : `Заметка ${selectedNode.sources.length + 1}`,
+                  content: '',
+                  addedAt: new Date().toISOString(),
+                };
+                updateNode(selectedNode.id, {
+                  sources: [...selectedNode.sources, newSource],
+                });
+              }}
+              className="px-2 py-1 bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 rounded text-[10px] font-medium hover:bg-cyan-500/30 transition-colors"
+            >
+              + Добавить
+            </button>
+          </div>
         </div>
 
         {ownSources.length === 0 ? (
@@ -84,9 +107,20 @@ export default function SourcesPanel({ selectedNode, updateNode }: SourcesPanelP
                   placeholder="Текст источника..."
                   className="w-full px-2 py-1.5 bg-black/30 border border-white/10 rounded text-xs text-white focus:ring-1 focus:ring-cyan-500 outline-none resize-none"
                 />
-                <span className="text-[9px] text-gray-500">
-                  {new Date(source.addedAt).toLocaleDateString('ru-RU')}
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] text-gray-500">
+                    {new Date(source.addedAt).toLocaleDateString('ru-RU')}
+                  </span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${
+                    source.type === 'text'
+                      ? 'bg-cyan-500/20 text-cyan-300'
+                      : source.type === 'link'
+                      ? 'bg-amber-500/20 text-amber-300'
+                      : 'bg-gray-500/20 text-gray-400'
+                  }`}>
+                    {SOURCE_TYPE_OPTIONS.find((o) => o.value === source.type)?.label}
+                  </span>
+                </div>
               </div>
             ))}
           </div>
@@ -158,6 +192,16 @@ export default function SourcesPanel({ selectedNode, updateNode }: SourcesPanelP
           💡 <span className="text-cyan-400">RAG поиск</span> учитывает расстояние от центра и связи между задачами. 
           Источники от связанных задач имеют высокий вес, от родительских — средний.
         </p>
+        <p className="text-[9px] text-gray-500 leading-relaxed mt-1.5">
+          Поддерживаемые типы источников (отправляются в промпт ИИ):
+        </p>
+        <ul className="text-[9px] text-gray-500 leading-relaxed mt-1 space-y-0.5">
+          {SOURCE_TYPE_OPTIONS.map((opt) => (
+            <li key={opt.value}>
+              <span className="text-gray-300">{opt.label}</span> — {opt.desc}
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );

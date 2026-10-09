@@ -1,33 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../store';
-
-/**
- * Нормализует endpoint для браузера:
- * - если это Ollama на 192.168.x / 10.x / 172.16-31.x (не localhost/127.0.0.1),
- *   запрос идёт через Vite-прокси `/ollama-proxy` (обходит CORS и Private Network Access);
- * - иначе возвращает endpoint как есть.
- */
-function resolveEndpoint(endpoint: string): string {
-  if (endpoint && !/localhost|127\.0\.0\.1/i.test(endpoint)) {
-    try {
-      const { hostname } = new URL(endpoint);
-      if (
-        /^192\.168\./.test(hostname) ||
-        /^10\./.test(hostname) ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
-      ) {
-        return '/ollama-proxy';
-      }
-    } catch {
-      return endpoint;
-    }
-  }
-  return endpoint;
-}
-
-/** Значения по умолчанию из переменных окружения (Vite injects import.meta.env) */
-const DEFAULT_OLLAMA_ENDPOINT = import.meta.env.VITE_OLLAMA_ENDPOINT || 'http://localhost:11434';
-const DEFAULT_MODEL = import.meta.env.VITE_DEFAULT_MODEL || 'llama2';
+import { resolveEndpoint } from '../utils/aiService';
 
 export default function AIPanel() {
   const {
@@ -47,17 +20,26 @@ export default function AIPanel() {
   const [isTyping, setIsTyping] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelsStatus, setModelsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
   const testConnection = async () => {
+    const trimmed = (aiConfig.endpoint || '').trim();
+    if (!trimmed) {
+      setConnectionStatus('error');
+      addChatMessage({ role: 'user', content: '⚠️ Сначала укажите endpoint в настройках ИИ' });
+      return;
+    }
     setConnectionStatus('testing');
     try {
-      const endpoint = resolveEndpoint(aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT);
+      const endpoint = resolveEndpoint(trimmed);
       const response = await fetch(`${endpoint}/api/tags`);
       if (response.ok) {
         setConnectionStatus('success');
-        setTimeout(() => setConnectionStatus('idle'), 2000);
+        fetchModels();
+        setTimeout(() => setConnectionStatus('idle'), 3000);
       } else {
         setConnectionStatus('error');
         setTimeout(() => setConnectionStatus('idle'), 2000);
@@ -67,6 +49,51 @@ export default function AIPanel() {
       setTimeout(() => setConnectionStatus('idle'), 2000);
     }
   };
+
+  /** Загружает список доступных моделей из API провайдера. */
+  const fetchModels = useCallback(async () => {
+    const endpointRaw = (aiConfig.endpoint || '').trim();
+    if (!endpointRaw) return;
+
+    // У Ollama используем /api/tags, у OpenAI-совместимых — /v1/models
+    const endpoint = resolveEndpoint(endpointRaw);
+    const url = aiConfig.provider === 'ollama'
+      ? `${endpoint}/api/tags`
+      : `${endpoint.replace(/\/$/, '')}/v1/models`;
+
+    setModelsStatus('loading');
+    try {
+      const headers: Record<string, string> = {};
+      if (aiConfig.provider !== 'ollama' && aiConfig.apiKey) {
+        headers['Authorization'] = `Bearer ${aiConfig.apiKey}`;
+      }
+
+      const response = await fetch(url, { headers });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (aiConfig.provider === 'ollama') {
+        // Ollama: { models: [{ name, model, ... }] }
+        const names = (data?.models || [])
+          .map((m: any) => m?.name || m?.model)
+          .filter((n: unknown): n is string => typeof n === 'string' && n.length > 0);
+        setAvailableModels(names);
+      } else {
+        // OpenAI-совместимые: { data: [{ id, ... }] }
+        const ids = (data?.data || [])
+          .map((m: any) => m?.id)
+          .filter((n: unknown): n is string => typeof n === 'string' && n.length > 0);
+        setAvailableModels(ids);
+      }
+      setModelsStatus('success');
+    } catch (error) {
+      setAvailableModels([]);
+      setModelsStatus('error');
+    }
+  }, [aiConfig.endpoint, aiConfig.provider, aiConfig.apiKey]);
 
   const handleSendMessage = async () => {
     if (!chatInput.trim()) return;
@@ -97,12 +124,20 @@ export default function AIPanel() {
 
     // Real API call
     try {
-      const endpoint = resolveEndpoint(aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT);
-      const model = aiConfig.model || DEFAULT_MODEL;
+      const endpointRaw = (aiConfig.endpoint || '').trim();
+      if (!endpointRaw) {
+        throw new Error('Endpoint не задан. Укажите его в настройках ИИ.');
+      }
+      const model = (aiConfig.model || '').trim();
+      if (!model) {
+        throw new Error('Модель не задана. Укажите её в настройках ИИ.');
+      }
+      const endpoint = resolveEndpoint(endpointRaw);
       
-      // Build context from accessible sources
+      // Build context from accessible sources (только текстовые источники инжектятся в промпт)
       const accessibleSources = selectedNodeId 
         ? useStore.getState().getAccessibleSources(selectedNodeId)
+            .filter((item) => item.source.type === 'text')
         : [];
       
       let systemPrompt = aiConfig.systemPrompt || 'Ты — ИИ-ассистент для планирования задач.';
@@ -160,7 +195,7 @@ export default function AIPanel() {
       const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
       addChatMessage({
         role: 'assistant',
-        content: `❌ Ошибка подключения к ИИ: ${errorMessage}\n\nПроверьте:\n• Запущен ли Ollama\n• Правильность endpoint (${aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT})\n• Наличие модели ${aiConfig.model || DEFAULT_MODEL}`,
+        content: `❌ Ошибка подключения к ИИ: ${errorMessage}\n\nПроверьте настройки в ⚙️:\n• Endpoint: ${aiConfig.endpoint || '(не задан)'}\n• Модель: ${aiConfig.model || '(не задана)'}`,
         nodeId: selectedNodeId || undefined,
       });
     } finally {
@@ -242,19 +277,19 @@ export default function AIPanel() {
           {(aiConfig.provider === 'ollama' || aiConfig.provider === 'custom') && (
             <button
               onClick={testConnection}
-              disabled={connectionStatus === 'testing'}
+              disabled={connectionStatus === 'testing' || !(aiConfig.endpoint || '').trim()}
               className={`w-full px-2 py-1.5 rounded text-xs font-medium transition-all ${
                 connectionStatus === 'success'
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50'
                   : connectionStatus === 'error'
                   ? 'bg-red-500/20 text-red-300 border border-red-400/50'
                   : 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 hover:bg-cyan-500/30'
-              } disabled:opacity-50`}
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
             >
               {connectionStatus === 'testing' && '🔄 Проверка...'}
               {connectionStatus === 'success' && '✅ Подключено'}
               {connectionStatus === 'error' && '❌ Ошибка подключения'}
-              {connectionStatus === 'idle' && '🔌 Тест соединения'}
+              {connectionStatus === 'idle' && ((aiConfig.endpoint || '').trim() ? '🔌 Тест соединения' : '🔌 Укажите Endpoint')}
             </button>
           )}
 
@@ -281,20 +316,41 @@ export default function AIPanel() {
                   type="text"
                   value={aiConfig.endpoint}
                   onChange={(e) => setAIConfig({ endpoint: e.target.value })}
-                  placeholder={aiConfig.provider === 'ollama' ? DEFAULT_OLLAMA_ENDPOINT : ''}
+                  placeholder={aiConfig.provider === 'custom' ? 'https://api.example.com/v1' : 'http://localhost:11434'}
                   className="w-full px-2 py-1 bg-black/50 border border-cyan-500/30 rounded text-xs text-white outline-none"
                 />
               </div>
 
               <div>
                 <label className="block text-[9px] text-gray-400 mb-1">Модель</label>
-                <input
-                  type="text"
-                  value={aiConfig.model}
-                  onChange={(e) => setAIConfig({ model: e.target.value })}
-                  placeholder={aiConfig.provider === 'openai' ? 'gpt-3.5-turbo' : aiConfig.provider === 'ollama' ? 'llama2' : ''}
-                  className="w-full px-2 py-1 bg-black/50 border border-cyan-500/30 rounded text-xs text-white outline-none"
-                />
+                  <button
+                    type="button"
+                    onClick={fetchModels}
+                    disabled={modelsStatus === 'loading' || !(aiConfig.endpoint || '').trim()}
+                    className="text-[9px] text-cyan-400 hover:text-cyan-300 disabled:opacity-40 mb-1 block transition-colors"
+                  >
+                    {modelsStatus === 'loading' ? '🔄 Загрузка...' : modelsStatus === 'error' ? '⚠️ Ошибка — повторить' : '📡 Загрузить модели'}
+                  </button>
+                {availableModels.length > 0 ? (
+                  <select
+                    value={aiConfig.model}
+                    onChange={(e) => setAIConfig({ model: e.target.value })}
+                    className="w-full px-2 py-1 bg-black/50 border border-cyan-500/30 rounded text-xs text-white outline-none"
+                  >
+                    <option value="">— выберите модель —</option>
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={aiConfig.model}
+                    onChange={(e) => setAIConfig({ model: e.target.value })}
+                    placeholder={aiConfig.provider === 'openai' ? 'gpt-4o-mini' : aiConfig.provider === 'ollama' ? 'qwen2.5' : 'model-name'}
+                    className="w-full px-2 py-1 bg-black/50 border border-cyan-500/30 rounded text-xs text-white outline-none"
+                  />
+                )}
               </div>
             </>
           )}

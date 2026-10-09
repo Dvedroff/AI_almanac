@@ -3,6 +3,7 @@ import { useStore } from '../store';
 import { NodeStatus } from '../types';
 import AIPanel from './AIPanel';
 import SourcesPanel from './SourcesPanel';
+import InboxPanel from './InboxPanel';
 
 export default function HUD() {
   const {
@@ -25,9 +26,20 @@ export default function HUD() {
     updateNodeStatus,
     selectNode,
     addNode,
+    addThought,
   } = useStore();
 
   const [showSearch, setShowSearch] = useState(false);
+  const [showThoughtCapture, setShowThoughtCapture] = useState(false);
+  const [thoughtText, setThoughtText] = useState('');
+
+  const handleCaptureThought = () => {
+    const id = addThought(thoughtText);
+    if (id) {
+      setThoughtText('');
+      setShowThoughtCapture(false);
+    }
+  };
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId);
 
@@ -41,18 +53,24 @@ export default function HUD() {
 
   const stats = {
     stars: nodes.filter((n) => n.status === 'star').length,
+    clusters: nodes.filter((n) => n.status === 'cluster').length,
+    systems: nodes.filter((n) => n.status === 'system').length,
     planets: nodes.filter((n) => n.status === 'planet').length,
     satellites: nodes.filter((n) => n.status === 'satellite').length,
     asteroids: nodes.filter((n) => n.status === 'asteroid').length,
+    comets: nodes.filter((n) => n.status === 'comet').length,
     connections: connections.length,
   };
 
   const statusOptions: { value: NodeStatus; label: string; emoji: string }[] = [
     { value: 'galaxy_center', label: 'Центр', emoji: '🌌' },
     { value: 'star', label: 'Звезда', emoji: '⭐' },
+    { value: 'cluster', label: 'Кластер', emoji: '🌟' },
+    { value: 'system', label: 'Система', emoji: '💫' },
     { value: 'planet', label: 'Планета', emoji: '🪐' },
     { value: 'satellite', label: 'Спутник', emoji: '🛰️' },
-    { value: 'asteroid', label: 'Астероид', emoji: '☄️' },
+    { value: 'asteroid', label: 'Астероид', emoji: '🪨' },
+    { value: 'comet', label: 'Комета', emoji: '☄️' },
     { value: 'blackhole', label: 'Чёрная дыра', emoji: '🕳️' },
   ];
 
@@ -130,7 +148,7 @@ export default function HUD() {
                           }}
                           className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/10 text-xs transition-colors flex items-center gap-2"
                         >
-                          <span>{node.status === 'star' ? '⭐' : node.status === 'planet' ? '🪐' : '🛰️'}</span>
+                          <span>{node.status === 'galaxy_center' ? '🌌' : node.status === 'star' ? '⭐' : node.status === 'cluster' ? '🌟' : node.status === 'system' ? '💫' : node.status === 'planet' ? '🪐' : node.status === 'satellite' ? '🛰️' : node.status === 'comet' ? '☄️' : node.status === 'blackhole' ? '🕳️' : '🪨'}</span>
                           <span className="text-gray-200 truncate">{node.label}</span>
                         </button>
                       ))}
@@ -165,6 +183,14 @@ export default function HUD() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
               </svg>
               {connectingMode ? (connectingFrom ? 'Выберите 2-ю' : 'Выберите 1-ю') : 'Связь'}
+            </button>
+
+            <button
+              onClick={() => setShowThoughtCapture(true)}
+              className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-r from-fuchsia-500 to-cyan-500 text-white rounded-lg text-xs font-medium hover:from-fuchsia-400 hover:to-cyan-400 transition-all shadow-[0_0_15px_rgba(217,70,239,0.4)] hover:shadow-[0_0_20px_rgba(217,70,239,0.6)]"
+            >
+              <span className="text-sm leading-none">💭</span>
+              Мысль
             </button>
 
             <button
@@ -213,10 +239,22 @@ export default function HUD() {
             >
               📎 Источники
             </button>
+            <button
+              onClick={() => setSidebarTab('inbox')}
+              className={`flex-1 px-3 py-2.5 text-[10px] font-medium transition-all ${
+                sidebarTab === 'inbox'
+                  ? 'text-amber-300 border-b-2 border-amber-400 bg-amber-500/10 shadow-[inset_0_-2px_10px_rgba(251,191,36,0.3)]'
+                  : 'text-gray-500 hover:text-amber-400'
+              }`}
+            >
+              📥 Входящие
+            </button>
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {!selectedNode ? (
+            {sidebarTab === 'inbox' ? (
+              <InboxPanel />
+            ) : !selectedNode ? (
               <div className="flex flex-col items-center justify-center h-full p-6 text-center">
                 <div className="text-5xl mb-4">🌌</div>
                 <h3 className="text-sm font-semibold text-gray-300 mb-2">Выберите объект</h3>
@@ -371,6 +409,52 @@ export default function HUD() {
           </p>
         </div>
       </div>
+
+      {showThoughtCapture && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setShowThoughtCapture(false)}
+        >
+          <div
+            className="w-[420px] max-w-full bg-gray-900/95 border border-fuchsia-500/40 rounded-2xl p-5 shadow-[0_0_40px_rgba(217,70,239,0.3)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-white mb-1">💭 Новая мысль</h3>
+            <p className="text-[11px] text-gray-500 mb-3">
+              ИИ автоматически определит тип, класс и предложит связи с существующими объектами.
+            </p>
+            <textarea
+              value={thoughtText}
+              onChange={(e) => setThoughtText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleCaptureThought();
+                }
+              }}
+              placeholder="Например: Изучить Three.js для визуализации 3D-графиков..."
+              rows={3}
+              autoFocus
+              className="w-full px-3 py-2 bg-black/40 border border-fuchsia-500/30 rounded-lg text-sm text-white placeholder-gray-500 focus:border-fuchsia-400 focus:shadow-[0_0_10px_rgba(217,70,239,0.3)] outline-none resize-none transition-all"
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setShowThoughtCapture(false)}
+                className="px-3 py-2 rounded-lg text-xs text-gray-400 hover:bg-white/10 transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={handleCaptureThought}
+                disabled={!thoughtText.trim()}
+                className="px-4 py-2 bg-gradient-to-r from-fuchsia-500 to-cyan-500 text-white rounded-lg text-xs font-medium hover:from-fuchsia-400 hover:to-cyan-400 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-[0_0_15px_rgba(217,70,239,0.4)]"
+              >
+                Сохранить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

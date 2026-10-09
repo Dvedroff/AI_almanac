@@ -5,3 +5,5 @@ build/
 *.log
 .env
 repomix-output.xml
+.repomix/bundles.json
+.vscode/launch.json

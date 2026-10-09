@@ -1,7 +1,45 @@
 import { create } from 'zustand';
-import { TaskNode, Connection, ChatMessage, AISuggestion, NodeStatus, AIConfig, Source } from './types';
+import {
+  TaskNode, Connection, ChatMessage, AISuggestion, NodeStatus,
+  AIConfig, Source, SemanticKind, LifecycleStage, SemanticRelationType,
+  AnalysisResult, AIAnalysisMeta,
+} from './types';
+import { analyzeNewThought } from './utils/aiAgent';
 
 const uuid = () => crypto.randomUUID();
+const now = () => new Date().toISOString();
+
+function defaultAIAnalysis(): AIAnalysisMeta {
+  return {
+    state: 'not_started',
+    suggestedKind: 'unknown',
+    suggestedCosmicType: 'asteroid',
+    confidence: 0,
+    reasoning: '',
+    lastAnalyzedAt: null,
+    errorMessage: null,
+  };
+}
+
+function createNode(
+  overrides: Partial<TaskNode> & { id: string; label: string; position: [number, number, number] }
+): TaskNode {
+  const t = now();
+  return {
+    description: '',
+    status: 'asteroid',
+    kind: 'unknown',
+    lifecycle: 'unknown',
+    tags: [],
+    sources: [],
+    color: '#8b5cf6',
+    size: 1,
+    createdAt: t,
+    updatedAt: t,
+    aiAnalysis: defaultAIAnalysis(),
+    ...overrides,
+  };
+}
 
 interface GalaxyState {
   nodes: TaskNode[];
@@ -11,31 +49,39 @@ interface GalaxyState {
   chatMessages: ChatMessage[];
   suggestions: AISuggestion[];
   sidebarOpen: boolean;
-  sidebarTab: 'details' | 'ai' | 'sources';
+  sidebarTab: 'details' | 'ai' | 'sources' | 'inbox';
   searchQuery: string;
   focusMode: boolean;
   agentActive: boolean;
   aiConfig: AIConfig;
   connectingMode: boolean;
   connectingFrom: string | null;
+  dataVersion: number;
+  processingNodeIds: string[];
 
-  addNode: (position: [number, number, number], data?: Partial<TaskNode>) => void;
+  addNode: (position: [number, number, number], data?: Partial<TaskNode>) => string;
   updateNode: (id: string, data: Partial<TaskNode>) => void;
   deleteNode: (id: string) => void;
   selectNode: (id: string | null) => void;
   hoverNode: (id: string | null) => void;
   updateNodeStatus: (id: string, status: NodeStatus) => void;
 
+  addThought: (originalText: string) => string;
+  analyzeNode: (nodeId: string) => Promise<void>;
+  applyAnalysisResult: (nodeId: string, result: AnalysisResult) => void;
+
   addConnection: (source: string, target: string, type?: Connection['type']) => void;
   deleteConnection: (id: string) => void;
   acceptSuggestion: (suggestionId: string) => void;
+  acceptParentSuggestion: (suggestionId: string) => void;
   dismissSuggestion: (suggestionId: string) => void;
+  rejectSuggestion: (suggestionId: string) => void;
 
   addChatMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   clearChat: () => void;
 
   setSidebarOpen: (open: boolean) => void;
-  setSidebarTab: (tab: 'details' | 'ai' | 'sources') => void;
+  setSidebarTab: (tab: 'details' | 'ai' | 'sources' | 'inbox') => void;
   setSearchQuery: (query: string) => void;
   setFocusMode: (focus: boolean) => void;
   setAgentActive: (active: boolean) => void;
@@ -44,82 +90,121 @@ interface GalaxyState {
   setConnectingFrom: (id: string | null) => void;
   calculateDistances: () => void;
   getAccessibleSources: (taskId: string) => { source: Source; nodeId: string; weight: number; taskLabel: string }[];
-
   loadFromStorage: () => void;
   saveToStorage: () => void;
 }
+const VALID_KINDS = new Set<SemanticKind>(["idea","goal","project","task","observation","question","fact","problem","decision","resource","event","habit","unknown"]);
+const VALID_LIFECYCLES = new Set<LifecycleStage>(["inbox","proposed","confirmed","planned","active","waiting","done","someday","archived","unknown"]);
+const VALID_STATUS = new Set<NodeStatus>(["galaxy_center","star","cluster","system","planet","satellite","asteroid","comet","blackhole"]);
+const VALID_ANALYSIS_STATES = new Set(["not_started","processing","completed","error"]);
+
+function migrateNodes(rawNodes: any[]): TaskNode[] {
+  if (!Array.isArray(rawNodes)) return [];
+  return rawNodes.filter(Boolean).map((n: any) => {
+    const t = now();
+    const kind = VALID_KINDS.has(n.kind) ? n.kind : "unknown";
+    const lifecycle = VALID_LIFECYCLES.has(n.lifecycle) ? n.lifecycle : (n.isCenter || n.status === "galaxy_center" ? "confirmed" : "unknown");
+    const status = VALID_STATUS.has(n.status) ? n.status : "asteroid";
+    const ai = (n.aiAnalysis && typeof n.aiAnalysis === "object")
+      ? { state: VALID_ANALYSIS_STATES.has(n.aiAnalysis.state) ? n.aiAnalysis.state : "not_started",
+          suggestedKind: VALID_KINDS.has(n.aiAnalysis.suggestedKind) ? n.aiAnalysis.suggestedKind : "unknown",
+          suggestedCosmicType: VALID_STATUS.has(n.aiAnalysis.suggestedCosmicType) ? n.aiAnalysis.suggestedCosmicType : "asteroid",
+          confidence: typeof n.aiAnalysis.confidence === "number" ? Math.max(0, Math.min(1, n.aiAnalysis.confidence)) : 0,
+          reasoning: typeof n.aiAnalysis.reasoning === "string" ? n.aiAnalysis.reasoning : "",
+          lastAnalyzedAt: typeof n.aiAnalysis.lastAnalyzedAt === "string" ? n.aiAnalysis.lastAnalyzedAt : null,
+          errorMessage: typeof n.aiAnalysis.errorMessage === "string" ? n.aiAnalysis.errorMessage : null,
+        }
+      : defaultAIAnalysis();
+    return {
+      id: typeof n.id === "string" && n.id ? n.id : uuid(),
+      label: typeof n.label === "string" ? n.label : "без названия",
+      description: typeof n.description === "string" ? n.description : "",
+      status, kind, lifecycle,
+      originalText: typeof n.originalText === "string" ? n.originalText : undefined,
+      aiAnalysis: ai,
+      tags: Array.isArray(n.tags) ? n.tags.filter((t: any) => typeof t === "string") : [],
+      sources: Array.isArray(n.sources) ? n.sources.filter((s: any) => s && typeof s.id === "string").map((s: any) => ({
+        id: s.id, type: ["text","link","file"].includes(s.type) ? s.type : "text",
+        title: typeof s.title === "string" ? s.title : "",
+        content: typeof s.content === "string" ? s.content : "",
+        addedAt: typeof s.addedAt === "string" ? s.addedAt : t,
+      })) : [],
+      color: typeof n.color === "string" ? n.color : "#8b5cf6",
+      position: Array.isArray(n.position) && n.position.length === 3 ? n.position : [Math.random()*4-2, Math.random()*2, Math.random()*4-2],
+      size: typeof n.size === "number" && n.size > 0 ? n.size : 1,
+      constellation: typeof n.constellation === "string" ? n.constellation : undefined,
+      isCenter: !!n.isCenter,
+      distanceFromCenter: typeof n.distanceFromCenter === "number" ? n.distanceFromCenter : undefined,
+      createdAt: typeof n.createdAt === "string" ? n.createdAt : t,
+      updatedAt: typeof n.updatedAt === "string" ? n.updatedAt : t,
+    };
+  });
+}
+function migrateNodesV2toV3(rawNodes: any[]): TaskNode[] {
+  return migrateNodes(rawNodes).map((n) => {
+    if (!n.originalText) {
+      return { ...n, originalText: undefined, lifecycle: n.isCenter || n.status === "galaxy_center" ? "confirmed" : "unknown", aiAnalysis: { ...n.aiAnalysis, state: "not_started" as const } };
+    }
+    return n;
+  });
+}
+
+function connectionDuplicate(connections: Connection[], a: string, b: string, type?: Connection["type"]): boolean {
+  return connections.some((conn) =>
+    ((conn.source === a && conn.target === b) || (conn.source === b && conn.target === a)) &&
+    (type ? conn.type === type : true)
+  );
+}
+
+function hasHierarchyCycle(connections: Connection[], newParent: string, newChild: string): boolean {
+  const parentByChild = new Map<string, string[]>();
+  connections.filter((c) => c.type === "hierarchy").forEach((c) => {
+    const list = parentByChild.get(c.target) || [];
+    list.push(c.source);
+    parentByChild.set(c.target, list);
+  });
+  const stack = [newParent];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    if (cur === newChild) return true;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    const parents = parentByChild.get(cur) || [];
+    stack.push(...parents);
+  }
+  return false;
+}
+
+function getSmartPosition(nodes: TaskNode[]): [number, number, number] {
+  const tooClose = (x: number, y: number, z: number) =>
+    nodes.some((n) => { const dx=n.position[0]-x, dy=n.position[1]-y, dz=n.position[2]-z; return dx*dx+dy*dy+dz*dz < 4; });
+  let angle = Math.random()*Math.PI*2, radius = 10+Math.random()*4;
+  let x = Math.cos(angle)*radius, z = Math.sin(angle)*radius, y = (Math.random()-0.5)*3;
+  let attempts = 0;
+  while (tooClose(x,y,z) && attempts < 20) { angle+=0.6; radius+=1; x=Math.cos(angle)*radius; z=Math.sin(angle)*radius; y=(Math.random()-0.5)*4; attempts++; }
+  return [x, y, z];
+}
+
+function positionNearParent(parent: TaskNode): [number, number, number] {
+  const angle = Math.random()*Math.PI*2, dist = parent.size*1.8+1.5;
+  return [parent.position[0]+Math.cos(angle)*dist, parent.position[1]+(Math.random()-0.5)*1.5, parent.position[2]+Math.sin(angle)*dist];
+}
 
 const defaultNodes: TaskNode[] = [
-  {
-    id: 'center',
-    label: 'Работа',
-    description: 'Центр галактики — корневая категория',
-    status: 'galaxy_center',
-    tags: ['корень'],
-    sources: [],
-    color: '#fbbf24',
-    position: [0, 0, 0],
-    size: 3,
-    constellation: 'main',
-    isCenter: true,
-  },
-  {
-    id: '1',
-    label: 'Разработка Галактики',
-    description: 'Главный проект — 3D планировщик задач с ИИ-агентом',
-    status: 'star',
-    tags: ['основное', 'проект'],
-    sources: [],
-    color: '#fbbf24',
-    position: [8, 2, -3],
-    size: 1.8,
-    constellation: 'main',
-  },
-  {
-    id: '2',
-    label: 'Дизайн UI',
-    description: 'Макеты и прототипы интерфейса',
-    status: 'planet',
-    tags: ['дизайн', 'ui'],
-    sources: [],
-    color: '#06b6d4',
-    position: [12, 4, -5],
-    size: 1.2,
-    constellation: 'main',
-  },
-  {
-    id: '3',
-    label: 'Интеграция с ИИ',
-    description: 'Подключение LLM через API или локально',
-    status: 'planet',
-    tags: ['ai', 'backend'],
-    sources: [],
-    color: '#a855f7',
-    position: [10, -2, -1],
-    size: 1.2,
-    constellation: 'main',
-  },
-  {
-    id: '4',
-    label: 'Налоговая декларация',
-    description: 'Сложная бюрократическая задача',
-    status: 'blackhole',
-    tags: ['финансы', 'бюрократия'],
-    sources: [],
-    color: '#6b21a8',
-    position: [-10, -3, 6],
-    size: 1.6,
-    constellation: 'main',
-  },
+  createNode({ id: "center", label: "Я", description: "Центр галактики — пользователь и его общий контекст", status: "galaxy_center", kind: "unknown", lifecycle: "confirmed", tags: ["корень"], color: "#fbbf24", position: [0,0,0], size: 3, constellation: "main", isCenter: true }),
+  createNode({ id: "1", label: "Разработка Галактики", description: "Главный проект — 3D планировщик задач с ИИ-агентом", status: "star", kind: "project", lifecycle: "active", tags: ["основное","проект"], color: "#fbbf24", position: [8,2,-3], size: 1.8, constellation: "main" }),
+  createNode({ id: "2", label: "Дизайн UI", description: "Макеты и прототипы интерфейса", status: "planet", kind: "task", lifecycle: "planned", tags: ["дизайн","ui"], color: "#06b6d4", position: [12,4,-5], size: 1.2, constellation: "main" }),
+  createNode({ id: "3", label: "Интеграция с ИИ", description: "Подключение LLM через API или локально", status: "planet", kind: "task", lifecycle: "active", tags: ["ai","backend"], color: "#a855f7", position: [10,-2,-1], size: 1.2, constellation: "main" }),
+  createNode({ id: "4", label: "Налоговая декларация", description: "Сложная бюрократическая задача", status: "blackhole", kind: "problem", lifecycle: "waiting", tags: ["финансы","бюрократия"], color: "#6b21a8", position: [-10,-3,6], size: 1.6, constellation: "main" }),
 ];
 
 const defaultConnections: Connection[] = [
-  { id: 'c1', source: 'center', target: '1', type: 'hierarchy', strength: 1 },
-  { id: 'c2', source: '1', target: '2', type: 'hierarchy', strength: 0.9 },
-  { id: 'c3', source: '1', target: '3', type: 'hierarchy', strength: 0.9 },
-  { id: 'c6', source: 'center', target: '4', type: 'hierarchy', strength: 0.7 },
+  { id: uuid(), source: "1", target: "center", type: "hierarchy", strength: 1, revealed: true },
+  { id: uuid(), source: "2", target: "1", type: "hierarchy", strength: 1, revealed: true },
+  { id: uuid(), source: "3", target: "1", type: "hierarchy", strength: 1, revealed: true },
+  { id: uuid(), source: "4", target: "center", type: "hierarchy", strength: 1, revealed: true },
 ];
-
 export const useStore = create<GalaxyState>((set, get) => ({
   nodes: defaultNodes,
   connections: defaultConnections,
@@ -132,270 +217,235 @@ export const useStore = create<GalaxyState>((set, get) => ({
   searchQuery: '',
   focusMode: false,
   agentActive: true,
-  aiConfig: {
-    provider: 'demo',
-    endpoint: import.meta.env.VITE_OLLAMA_ENDPOINT || '',
-    apiKey: '',
-    model: import.meta.env.VITE_DEFAULT_MODEL || '',
-    systemPrompt: 'Ты — ИИ-агент для планирования задач.',
-  },
+  aiConfig: { provider: 'demo' as const, endpoint: '', apiKey: '', model: '', systemPrompt: 'Ты — ИИ-агент для планирования задач.' },
   connectingMode: false,
   connectingFrom: null,
+  dataVersion: 3,
+  processingNodeIds: [],
 
-  addNode: (position: [number, number, number], data?: Partial<TaskNode>) => {
-    const newNode: TaskNode = {
-      id: uuid(),
-      label: data?.label || 'Новая звезда',
-      description: data?.description || '',
-      status: data?.status || 'asteroid',
-      tags: data?.tags || [],
-      sources: data?.sources || [],
-      color: data?.color || '#8b5cf6',
-      position,
-      size: data?.size || 1,
-      constellation: data?.constellation,
-    };
-    set((state) => ({ nodes: [...state.nodes, newNode] }));
+  addNode: (position, data = {}) => {
+    const newNode = createNode({
+      id: uuid(), label: data.label ?? 'Новая звезда', description: data.description ?? '',
+      status: data.status ?? 'asteroid', kind: data.kind ?? 'unknown', lifecycle: data.lifecycle ?? 'unknown',
+      tags: data.tags ?? [], sources: data.sources ?? [], color: data.color ?? '#8b5cf6',
+      position, size: data.size ?? 1, constellation: data.constellation, isCenter: data.isCenter,
+      originalText: data.originalText, aiAnalysis: data.aiAnalysis,
+    });
+    set((s) => ({ nodes: [...s.nodes, newNode] }));
     get().calculateDistances();
     get().saveToStorage();
+    return newNode.id;
   },
 
   updateNode: (id, data) => {
-    set((state) => ({
-      nodes: state.nodes.map((node) =>
-        node.id === id ? { ...node, ...data } : node
-      ),
-    }));
+    set((s) => ({ nodes: s.nodes.map((n) => (n.id === id ? { ...n, ...data, updatedAt: now() } : n)) }));
+    get().calculateDistances();
     get().saveToStorage();
   },
 
   deleteNode: (id) => {
-    set((state) => {
-      const updatedConnections = state.connections.map((conn) => {
-        if (conn.type === 'suggested' && (conn.source === id || conn.target === id)) {
-          return { ...conn, revealed: true };
-        }
-        return conn;
-      });
-
-      return {
-        nodes: state.nodes.filter((node) => node.id !== id),
-        connections: updatedConnections.filter(
-          (conn) => conn.source !== id && conn.target !== id
-        ),
-        selectedNodeId: state.selectedNodeId === id ? null : state.selectedNodeId,
-      };
-    });
+    set((state) => ({
+      nodes: state.nodes.filter((n) => n.id !== id),
+      connections: state.connections.filter((c) => c.source !== id && c.target !== id),
+      suggestions: state.suggestions.filter((s) => s.source !== id && s.target !== id && s.analyzedNodeId !== id),
+      selectedNodeId: state.selectedNodeId === id ? null : state.selectedNodeId,
+      processingNodeIds: state.processingNodeIds.filter((pid) => pid !== id),
+    }));
     get().calculateDistances();
     get().saveToStorage();
   },
 
-  selectNode: (id) => {
-    const state = get();
-    
-    if (state.connectingMode && state.connectingFrom && id && id !== state.connectingFrom) {
-      const existingConnection = state.connections.find(
-        conn => (conn.source === state.connectingFrom && conn.target === id) ||
-                (conn.source === id && conn.target === state.connectingFrom)
-      );
-      
-      if (!existingConnection) {
-        get().addConnection(state.connectingFrom, id, 'semantic');
-      }
-      
-      set({ connectingMode: false, connectingFrom: null });
-      return;
-    }
-    
-    if (state.connectingMode && !state.connectingFrom && id) {
-      set({ connectingFrom: id });
-      return;
-    }
-    
-    set({ selectedNodeId: id, sidebarOpen: id !== null, focusMode: id !== null });
-    if (id) set({ sidebarTab: 'details' });
-  },
-
+  selectNode: (id) => set({ selectedNodeId: id }),
   hoverNode: (id) => set({ hoveredNodeId: id }),
+  updateNodeStatus: (id, status) => get().updateNode(id, { status }),
 
-  updateNodeStatus: (id, status) => {
-    set((state) => ({
-      nodes: state.nodes.map((node) =>
-        node.id === id ? { ...node, status } : node
-      ),
-    }));
+  addThought: (originalText) => {
+    if (!originalText.trim()) return '';
+    const id = get().addNode(getSmartPosition(get().nodes), {
+      label: originalText.slice(0, 60), description: '',
+      status: 'asteroid', kind: 'unknown', lifecycle: 'inbox',
+      originalText, color: '#06b6d4', size: 0.9, aiAnalysis: defaultAIAnalysis(),
+    });
+    if (get().agentActive) get().analyzeNode(id);
+    return id;
+  },
+
+  analyzeNode: async (nodeId) => {
+    const state = get();
+    if (state.processingNodeIds.includes(nodeId)) return;
+    const node = state.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    get().updateNode(nodeId, { aiAnalysis: { ...(node.aiAnalysis || defaultAIAnalysis()), state: 'processing', processingStartedAt: now(), errorMessage: null } });
+    set((s) => ({ processingNodeIds: [...s.processingNodeIds, nodeId] }));
+    try {
+      const result = await analyzeNewThought(node, get().nodes, get().connections, get().aiConfig);
+      get().applyAnalysisResult(nodeId, result);
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : 'Неизвестная ошибка';
+      get().updateNode(nodeId, { aiAnalysis: { ...(get().nodes.find((n) => n.id === nodeId)?.aiAnalysis || defaultAIAnalysis()), state: 'error', errorMessage: errorMsg, lastAnalyzedAt: now() } });
+    } finally {
+      set((s) => ({ processingNodeIds: s.processingNodeIds.filter((pid) => pid !== nodeId) }));
+    }
+  },
+
+  applyAnalysisResult: (nodeId, result) => {
+const state = get();
+    const node = state.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const isLowConfidence = result.confidence < 0.35;
+    get().updateNode(nodeId, {
+      kind: isLowConfidence ? 'unknown' : result.kind,
+      status: isLowConfidence ? 'asteroid' : result.cosmicType,
+      lifecycle: isLowConfidence ? 'inbox' : result.lifecycle,
+      label: result.suggestedLabel || node.label,
+      description: result.suggestedDescription || node.description,
+      aiAnalysis: { state: 'completed', suggestedKind: result.kind, suggestedCosmicType: result.cosmicType, confidence: result.confidence, reasoning: result.reasoning, lastAnalyzedAt: now(), errorMessage: null },
+    });
+    const newSuggestions: AISuggestion[] = [];
+    if (result.proposedParentId && result.proposedParentId !== nodeId && !hasHierarchyCycle(state.connections, result.proposedParentId, nodeId) && !connectionDuplicate(state.connections, nodeId, result.proposedParentId, 'hierarchy')) {
+      newSuggestions.push({ id: uuid(), type: 'link', source: nodeId, target: result.proposedParentId, connectionType: 'hierarchy', reason: result.reasoning || 'Предложено ИИ', confidence: result.confidence, timestamp: now(), analyzedNodeId: nodeId });
+    }
+    for (const rel of result.proposedRelations) {
+      if (rel.targetId !== nodeId && !connectionDuplicate(state.connections, nodeId, rel.targetId, 'semantic')) {
+        newSuggestions.push({ id: uuid(), type: 'link', source: nodeId, target: rel.targetId, connectionType: 'semantic', relationKind: rel.relationType, reason: rel.reason || result.reasoning || 'Предложено ИИ', confidence: rel.confidence, timestamp: now(), analyzedNodeId: nodeId });
+      }
+    }
+    if (newSuggestions.length > 0) set((s) => ({ suggestions: [...s.suggestions, ...newSuggestions] }));
+    get().saveToStorage();
+  },
+addConnection: (source, target, type = 'hierarchy') => {
+    const state = get();
+    if (connectionDuplicate(state.connections, source, target, type)) return;
+    if (type === 'hierarchy' && hasHierarchyCycle(state.connections, source, target)) return;
+    if (!state.nodes.find((n) => n.id === source) || !state.nodes.find((n) => n.id === target)) return;
+    if (source === target) return;
+    set((s) => ({ connections: [...s.connections, { id: uuid(), source, target, type, strength: type === 'suggested' ? 0.5 : 1, revealed: type !== 'suggested' }] }));
     get().saveToStorage();
   },
 
-  addConnection: (source: string, target: string, type: Connection['type'] = 'hierarchy') => {
-    const newConn: Connection = {
-      id: uuid(),
-      source,
-      target,
-      type,
-      strength: type === 'suggested' ? 0.5 : 1,
-      revealed: type !== 'suggested',
-    };
-    set((state) => ({ connections: [...state.connections, newConn] }));
-    get().saveToStorage();
-  },
-
-  deleteConnection: (id) => {
-    set((state) => ({
-      connections: state.connections.filter((conn) => conn.id !== id),
-    }));
-    get().saveToStorage();
-  },
+  deleteConnection: (id) => { set((s) => ({ connections: s.connections.filter((c) => c.id !== id) })); get().saveToStorage(); },
 
   acceptSuggestion: (suggestionId) => {
     const suggestion = get().suggestions.find((s) => s.id === suggestionId);
     if (suggestion && suggestion.type === 'link' && suggestion.target) {
-      get().addConnection(suggestion.source, suggestion.target, 'semantic');
+      const node = get().nodes.find((n) => n.id === suggestion.source);
+      if (suggestion.connectionType === 'hierarchy') {
+        get().addConnection(suggestion.source, suggestion.target, 'hierarchy');
+        if (node) get().updateNode(suggestion.source, { lifecycle: 'confirmed', position: positionNearParent(node) });
+      } else {
+        set((s) => ({ connections: [...s.connections, { id: uuid(), source: suggestion.source, target: suggestion.target, type: 'semantic', relationKind: suggestion.relationKind || 'related_to', strength: 1, revealed: true }] }));
+      }
     }
-    set((state) => ({
-      suggestions: state.suggestions.filter((s) => s.id !== suggestionId),
-    }));
+    set((s) => ({ suggestions: s.suggestions.filter((s) => s.id !== suggestionId) }));
+    get().saveToStorage();
   },
 
-  dismissSuggestion: (suggestionId) => {
-    set((state) => ({
-      suggestions: state.suggestions.filter((s) => s.id !== suggestionId),
-    }));
+  acceptParentSuggestion: (suggestionId) => {
+    const suggestion = get().suggestions.find((s) => s.id === suggestionId && s.connectionType === 'hierarchy' && s.target);
+    if (!suggestion || !suggestion.target) { set((s) => ({ suggestions: s.suggestions.filter((s) => s.id !== suggestionId) })); return; }
+    get().addConnection(suggestion.source, suggestion.target, 'hierarchy');
+    get().updateNode(suggestion.source, { lifecycle: 'confirmed' });
+    const node = get().nodes.find((n) => n.id === suggestion.source);
+    if (node) get().updateNode(suggestion.source, { position: positionNearParent(node) });
+    set((s) => ({ suggestions: s.suggestions.filter((s) => s.id !== suggestionId) }));
+    get().saveToStorage();
   },
 
-  addChatMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => {
-    const newMessage: ChatMessage = {
-      ...message,
-      id: uuid(),
-      timestamp: new Date().toISOString(),
-    };
-    set((state) => ({ chatMessages: [...state.chatMessages, newMessage] }));
-  },
+  dismissSuggestion: (suggestionId) => { set((s) => ({ suggestions: s.suggestions.filter((s) => s.id !== suggestionId) })); get().saveToStorage(); },
+  rejectSuggestion: (suggestionId) => { set((s) => ({ suggestions: s.suggestions.filter((s) => s.id !== suggestionId) })); get().saveToStorage(); },
 
-  clearChat: () => set({ chatMessages: [] }),
+  addChatMessage: (message) => { set((s) => ({ chatMessages: [...s.chatMessages, { ...message, id: uuid(), timestamp: now() }] })); get().saveToStorage(); },
+  clearChat: () => { set({ chatMessages: [] }); get().saveToStorage(); },
 
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   setSearchQuery: (query) => set({ searchQuery: query }),
   setFocusMode: (focus) => set({ focusMode: focus }),
-  setAgentActive: (active) => set({ agentActive: active }),
-  setAIConfig: (config) => set((state) => ({ aiConfig: { ...state.aiConfig, ...config } })),
-  setConnectingMode: (active) => set({ connectingMode: active, connectingFrom: null }),
+  setAgentActive: (active) => { set({ agentActive: active }); get().saveToStorage(); },
+  setAIConfig: (config) => { set((s) => ({ aiConfig: { ...s.aiConfig, ...config } })); get().saveToStorage(); },
+  setConnectingMode: (active) => set({ connectingMode: active }),
   setConnectingFrom: (id) => set({ connectingFrom: id }),
-  
-  calculateDistances: () => {
-    const state = get();
-    const centerNode = state.nodes.find(n => n.isCenter || n.status === 'galaxy_center');
-    if (!centerNode) return;
-    
-    const updatedNodes = state.nodes.map(node => {
-      if (node.id === centerNode.id) {
-        return { ...node, distanceFromCenter: 0 };
-      }
-      
-      const dx = node.position[0] - centerNode.position[0];
-      const dy = node.position[1] - centerNode.position[1];
-      const dz = node.position[2] - centerNode.position[2];
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      
-      return { ...node, distanceFromCenter: distance };
+calculateDistances: () => {
+    set((state) => {
+      const centerNode = state.nodes.find((n) => n.isCenter || n.status === 'galaxy_center');
+      if (!centerNode) return {};
+      const updatedNodes = state.nodes.map((node) => {
+        if (node.id === centerNode.id) return { ...node, distanceFromCenter: 0 };
+        const dx = node.position[0] - centerNode.position[0];
+        const dy = node.position[1] - centerNode.position[1];
+        const dz = node.position[2] - centerNode.position[2];
+        return { ...node, distanceFromCenter: Math.sqrt(dx * dx + dy * dy + dz * dz) };
+      });
+      return { nodes: updatedNodes };
     });
-    
-    set({ nodes: updatedNodes });
   },
-  
+
   getAccessibleSources: (taskId) => {
     const state = get();
-    const task = state.nodes.find(n => n.id === taskId);
+    const task = state.nodes.find((n) => n.id === taskId);
     if (!task) return [];
-    
-    const accessibleSources: { source: Source; nodeId: string; weight: number; taskLabel: string }[] = [];
-    
-    task.sources.forEach(source => {
-      accessibleSources.push({
-        source,
-        nodeId: task.id,
-        weight: 1.0,
-        taskLabel: task.label,
-      });
-    });
-    
+    const result: { source: Source; nodeId: string; weight: number; taskLabel: string }[] = [];
+    task.sources.forEach((source) => result.push({ source, nodeId: task.id, weight: 1.0, taskLabel: task.label }));
     const connectedTasks = state.connections
-      .filter(conn => conn.source === taskId || conn.target === taskId)
-      .map(conn => conn.source === taskId ? conn.target : conn.source);
-    
-    connectedTasks.forEach(connectedId => {
-      const connectedNode = state.nodes.find(n => n.id === connectedId);
+      .filter((conn) => conn.source === taskId || conn.target === taskId)
+      .map((conn) => conn.source === taskId ? conn.target : conn.source);
+    connectedTasks.forEach((connectedId) => {
+      const connectedNode = state.nodes.find((n) => n.id === connectedId);
       if (!connectedNode) return;
-      
       const distance = connectedNode.distanceFromCenter || 0;
       const weight = 1 / (1 + distance * 0.1);
-      
-      connectedNode.sources.forEach(source => {
-        accessibleSources.push({
-          source,
-          nodeId: connectedNode.id,
-          weight,
-          taskLabel: connectedNode.label,
-        });
-      });
+      connectedNode.sources.forEach((source) => result.push({ source, nodeId: connectedNode.id, weight, taskLabel: connectedNode.label }));
     });
-    
-    const parentConnections = state.connections.filter(
-      conn => conn.target === taskId && conn.type === 'hierarchy'
-    );
-    
-    parentConnections.forEach(conn => {
-      const parentNode = state.nodes.find(n => n.id === conn.source);
-      if (!parentNode) return;
-      
-      const distance = parentNode.distanceFromCenter || 0;
-      const weight = 0.5 / (1 + distance * 0.15);
-      
-      parentNode.sources.forEach(source => {
-        accessibleSources.push({
-          source,
-          nodeId: parentNode.id,
-          weight,
-          taskLabel: parentNode.label,
-        });
-      });
-    });
-    
-    return accessibleSources;
+    return result;
   },
 
   loadFromStorage: () => {
     try {
-      const saved = localStorage.getItem('galaxy-ai-data-v2');
+      let saved = localStorage.getItem('galaxy-ai-data-v3');
       if (saved) {
         const data = JSON.parse(saved);
         set({
-          nodes: data.nodes || defaultNodes,
-          connections: data.connections || defaultConnections,
+          nodes: migrateNodes(data.nodes || []),
+          connections: data.connections || [],
           chatMessages: data.chatMessages || [],
           suggestions: data.suggestions || [],
           aiConfig: data.aiConfig || get().aiConfig,
+          agentActive: data.agentActive ?? true,
+          dataVersion: 3,
         });
+      } else {
+        saved = localStorage.getItem('galaxy-ai-data-v2');
+        if (saved) {
+          const data = JSON.parse(saved);
+          set({
+            nodes: migrateNodesV2toV3(data.nodes || []),
+            connections: data.connections || [],
+            chatMessages: data.chatMessages || [],
+            suggestions: data.suggestions || [],
+            aiConfig: data.aiConfig || get().aiConfig,
+            agentActive: data.agentActive ?? true,
+            dataVersion: 3,
+          });
+        }
       }
       setTimeout(() => get().calculateDistances(), 0);
-    } catch (e) {
-      console.error('Failed to load from storage:', e);
-    }
+    } catch (e) { console.error('Failed to load from storage:', e); }
   },
 
   saveToStorage: () => {
     try {
       const state = get();
-      localStorage.setItem('galaxy-ai-data-v2', JSON.stringify({
+      localStorage.setItem('galaxy-ai-data-v3', JSON.stringify({
+        dataVersion: 3,
         nodes: state.nodes,
         connections: state.connections,
         chatMessages: state.chatMessages,
         suggestions: state.suggestions,
         aiConfig: state.aiConfig,
+        agentActive: state.agentActive,
+        sidebarOpen: state.sidebarOpen,
+        sidebarTab: state.sidebarTab,
       }));
-    } catch (e) {
-      console.error('Failed to save to storage:', e);
-    }
+    } catch (e) { console.error('Failed to save:', e); }
   },
 }));
