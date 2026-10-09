@@ -1,6 +1,34 @@
 import { useState } from 'react';
 import { useStore } from '../store';
 
+/**
+ * Нормализует endpoint для браузера:
+ * - если это Ollama на 192.168.x / 10.x / 172.16-31.x (не localhost/127.0.0.1),
+ *   запрос идёт через Vite-прокси `/ollama-proxy` (обходит CORS и Private Network Access);
+ * - иначе возвращает endpoint как есть.
+ */
+function resolveEndpoint(endpoint: string): string {
+  if (endpoint && !/localhost|127\.0\.0\.1/i.test(endpoint)) {
+    try {
+      const { hostname } = new URL(endpoint);
+      if (
+        /^192\.168\./.test(hostname) ||
+        /^10\./.test(hostname) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
+      ) {
+        return '/ollama-proxy';
+      }
+    } catch {
+      return endpoint;
+    }
+  }
+  return endpoint;
+}
+
+/** Значения по умолчанию из переменных окружения (Vite injects import.meta.env) */
+const DEFAULT_OLLAMA_ENDPOINT = import.meta.env.VITE_OLLAMA_ENDPOINT || 'http://localhost:11434';
+const DEFAULT_MODEL = import.meta.env.VITE_DEFAULT_MODEL || 'llama2';
+
 export default function AIPanel() {
   const {
     nodes,
@@ -25,7 +53,7 @@ export default function AIPanel() {
   const testConnection = async () => {
     setConnectionStatus('testing');
     try {
-      const endpoint = aiConfig.endpoint || 'http://localhost:11434';
+      const endpoint = resolveEndpoint(aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT);
       const response = await fetch(`${endpoint}/api/tags`);
       if (response.ok) {
         setConnectionStatus('success');
@@ -69,8 +97,8 @@ export default function AIPanel() {
 
     // Real API call
     try {
-      const endpoint = aiConfig.endpoint || 'http://localhost:11434';
-      const model = aiConfig.model || 'llama2';
+      const endpoint = resolveEndpoint(aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT);
+      const model = aiConfig.model || DEFAULT_MODEL;
       
       // Build context from accessible sources
       const accessibleSources = selectedNodeId 
@@ -132,7 +160,7 @@ export default function AIPanel() {
       const errorMessage = error instanceof Error ? error.message : 'Неизвестная ошибка';
       addChatMessage({
         role: 'assistant',
-        content: `❌ Ошибка подключения к ИИ: ${errorMessage}\n\nПроверьте:\n• Запущен ли Ollama\n• Правильность endpoint (${aiConfig.endpoint || 'http://localhost:11434'})\n• Наличие модели ${aiConfig.model || 'llama2'}`,
+        content: `❌ Ошибка подключения к ИИ: ${errorMessage}\n\nПроверьте:\n• Запущен ли Ollama\n• Правильность endpoint (${aiConfig.endpoint || DEFAULT_OLLAMA_ENDPOINT})\n• Наличие модели ${aiConfig.model || DEFAULT_MODEL}`,
         nodeId: selectedNodeId || undefined,
       });
     } finally {
@@ -253,7 +281,7 @@ export default function AIPanel() {
                   type="text"
                   value={aiConfig.endpoint}
                   onChange={(e) => setAIConfig({ endpoint: e.target.value })}
-                  placeholder={aiConfig.provider === 'ollama' ? 'http://localhost:11434' : ''}
+                  placeholder={aiConfig.provider === 'ollama' ? DEFAULT_OLLAMA_ENDPOINT : ''}
                   className="w-full px-2 py-1 bg-black/50 border border-cyan-500/30 rounded text-xs text-white outline-none"
                 />
               </div>

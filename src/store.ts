@@ -134,9 +134,9 @@ export const useStore = create<GalaxyState>((set, get) => ({
   agentActive: true,
   aiConfig: {
     provider: 'demo',
-    endpoint: '',
+    endpoint: import.meta.env.VITE_OLLAMA_ENDPOINT || '',
     apiKey: '',
-    model: '',
+    model: import.meta.env.VITE_DEFAULT_MODEL || '',
     systemPrompt: 'Ты — ИИ-агент для планирования задач.',
   },
   connectingMode: false,
