@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../store';
 import { resolveEndpoint } from '../utils/aiService';
+import { collectRecommendations } from '../utils/recommendations';
 
 export default function AIPanel() {
   const {
     nodes,
+    connections,
     selectedNodeId,
     chatMessages,
     agentActive,
@@ -244,13 +246,14 @@ export default function AIPanel() {
             </button>
             <button
               onClick={() => setAgentActive(!agentActive)}
+              title={agentActive ? 'Агент включён: анализ новых мыслей запускается автоматически' : 'Агент выключен: новые мысли сохраняются без автоанализа'}
               className={`text-xs px-2 py-1 rounded transition-all ${
                 agentActive
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/50'
                   : 'bg-gray-700/50 text-gray-400 border border-gray-600/30'
               }`}
             >
-              {agentActive ? 'ON' : 'OFF'}
+              {agentActive ? '● Агент: ON' : '○ Агент: OFF'}
             </button>
           </div>
         </div>
@@ -356,6 +359,24 @@ export default function AIPanel() {
           )}
         </div>
       )}
+
+      <div className="px-3 py-2 border-b border-white/10 space-y-1.5">
+        <p className="text-[9px] text-gray-500 uppercase tracking-wider">Рекомендации</p>
+        {(() => {
+          const recs = collectRecommendations(nodes, connections, selectedNodeId);
+          if (recs.length === 0) return <p className="text-[10px] text-gray-600 italic">Пока нет локальных рекомендаций.</p>;
+          return (
+            <div className="space-y-1">
+              {recs.map((r) => (
+                <div key={r.id} className="bg-white/[0.03] border border-white/10 rounded-md px-2 py-1.5">
+                  <p className="text-[10px] text-gray-200">{r.type === 'swarm' ? '🔹' : r.type === 'goal_path' ? '🎯' : '🧲'} {r.title}</p>
+                  <p className="text-[9px] text-gray-500 leading-tight mt-0.5">{r.detail}</p>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {chatMessages.length === 0 && (

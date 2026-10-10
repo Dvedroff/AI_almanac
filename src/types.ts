@@ -7,6 +7,7 @@ export type NodeStatus =
   | 'satellite'
   | 'asteroid'
   | 'comet'
+  | 'meteor'
   | 'blackhole';
 
 /** Смысловой тип записи (независим от космического класса и жизненного цикла). */
@@ -43,7 +44,8 @@ export type AIAnalysisState =
   | 'not_started'
   | 'processing'
   | 'completed'
-  | 'error';
+  | 'fallback'
+  | 'failed';
 
 /** Метаданные анализа записи. Позволяет отличить реальный анализ от значений по умолчанию. */
 export interface AIAnalysisMeta {
@@ -55,6 +57,10 @@ export interface AIAnalysisMeta {
   lastAnalyzedAt: string | null;
   errorMessage: string | null;
   processingStartedAt?: string;
+  /** Откуда получен результат: реальный AI-запрос или локальная эвристика. */
+  analysisSource?: 'ai' | 'heuristic';
+  /** Проверенные клиентом утверждения анализа (с цитатами). */
+  claims?: Claim[];
 }
 
 /** Смысловое отношение между объектами (не иерархическое). */
@@ -65,7 +71,9 @@ export type SemanticRelationType =
   | 'conflicts_with'
   | 'duplicate_of'
   | 'derived_from'
-  | 'part_of';
+  | 'part_of'
+  | 'uses_resource'
+  | 'contributes_to_goal';
 
 export interface TaskNode {
   id: string;
@@ -100,6 +108,22 @@ export interface Connection {
   suggestionId?: string;
 }
 
+/** Источник доказательства и его состояние. */
+
+export type EvidenceSource = 'original_text' | 'description' | 'source_document' | 'inferred';
+
+export type ClaimStatus = 'verified' | 'unsupported' | 'contradicted' | 'unchecked';
+
+export interface EvidenceQuote {
+  /** Текст цитаты, которая поддерживает утверждение. */
+  text: string;
+  /** Откуда взята цитата. */
+  source: EvidenceSource;
+  /** Номер строки/позиция в исходном тексте (опционально). */
+  position?: number;
+  /** Статус проверки цитаты клиентом. */
+  status: ClaimStatus;
+}
 export interface Source {
   id: string;
   /**
@@ -136,6 +160,8 @@ export interface AISuggestion {
   reason: string;
   confidence: number;
   timestamp: string;
+  /** Цитаты-подтверждения связи. */
+  evidence?: EvidenceQuote[];
   /** Был ли пользователь уведомлён (для предотвращения повторных предложений) */
   notified?: boolean;
   /** ID узла, который анализировался (для привязки предложения к источнику анализа) */
@@ -143,6 +169,19 @@ export interface AISuggestion {
 }
 
 /** Структура результата анализа ИИ для одной записи. */
+/** Утверждение ИИ, проверяемое цитатами. */
+export interface Claim {
+  /** Краткая формулировка утверждения. */
+  text: string;
+  /** Является ли утверждение фактом из источника. */
+  classification: 'factual' | 'interpretation' | 'guess';
+  /** Защищено ли цитатой (частично или полностью). */
+  supported: boolean;
+  /** Цитаты-подтверждения. */
+  evidence: EvidenceQuote[];
+}
+
+/** Предлагаемая смысловая связь в результате анализа. */
 export interface AnalysisResult {
   kind: SemanticKind;
   cosmicType: NodeStatus;
@@ -154,6 +193,8 @@ export interface AnalysisResult {
   confidence: number;
   reasoning: string;
   clarificationNeeded: boolean;
+  /** Насколько обоснованы выводы; пусто, если не запрашивались. */
+  claims?: Claim[];
 }
 
 /** Предлагаемая смысловая связь. */
@@ -162,6 +203,8 @@ export interface ProposedRelation {
   relationType: SemanticRelationType;
   reason: string;
   confidence: number;
+  /** Цитаты/доказательства, на которых основана связь. */
+  evidence?: EvidenceQuote[];
 }
 
 export interface AIConfig {

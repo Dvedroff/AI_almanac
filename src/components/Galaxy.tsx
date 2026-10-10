@@ -31,19 +31,17 @@ function GalaxyContent() {
 
   return (
     <>
-      <ambientLight intensity={0.15} />
-      <pointLight position={[10, 10, 10]} intensity={0.5} color="#6366f1" />
-      <pointLight position={[-10, -10, -10]} intensity={0.3} color="#ec4899" />
-      <pointLight position={[0, 20, 0]} intensity={0.4} color="#06b6d4" />
+      <ambientLight intensity={0.4} />
+      <pointLight position={[10, 10, 10]} intensity={0.35} color="#ffffff" />
+      <pointLight position={[-10, -10, -10]} intensity={0.15} color="#a5b4fc" />
 
       <Stars
-        radius={100}
-        depth={80}
-        count={5000}
-        factor={4}
-        saturation={0.5}
+        radius={120}
+        depth={90}
+        count={2500}
+        factor={3}
+        saturation={0.3}
         fade
-        speed={0.5}
       />
 
       {connections.map((conn) => (
@@ -80,9 +78,9 @@ function GalaxyContent() {
 
       <EffectComposer>
         <Bloom
-          intensity={0.8}
-          luminanceThreshold={0.2}
-          luminanceSmoothing={0.9}
+          intensity={0.35}
+          luminanceThreshold={0.4}
+          luminanceSmoothing={0.8}
           mipmapBlur
         />
       </EffectComposer>
@@ -97,9 +95,9 @@ export default function Galaxy() {
         camera={{ position: [0, 10, 30], fov: 60 }}
         gl={{ antialias: true, alpha: false }}
         onCreated={({ gl }) => {
-          gl.setClearColor('#030712');
+          gl.setClearColor('#0a0a0f');
           gl.toneMapping = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.2;
+          gl.toneMappingExposure = 1.0;
         }}
       >
         <GalaxyContent />

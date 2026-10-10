@@ -7,8 +7,13 @@
   NodeStatus,
   TaskNode,
   SemanticRelationType,
+  EvidenceQuote,
+  EvidenceSource,
+  Claim,
+  ClaimStatus,
 } from '../types';
-import { callLLM, LLMValidationError } from './aiService';
+import { callLLM, sanitizeAgainstInjection, LLMValidationError, LLMUnavailableError, LLMTimeoutError } from './aiService';
+import { hasHierarchyCycle } from './connectionGuards';
 
 const MAX_CONTEXT_NODES = 25;
 
@@ -24,12 +29,13 @@ const ALL_LIFECYCLES: LifecycleStage[] = [
 
 const ALL_COSMIC: NodeStatus[] = [
   'galaxy_center', 'star', 'cluster', 'system', 'planet',
-  'satellite', 'asteroid', 'comet', 'blackhole',
+  'satellite', 'asteroid', 'comet', 'meteor', 'blackhole',
 ];
 
 const ALL_RELATIONS: SemanticRelationType[] = [
   'related_to', 'supports', 'depends_on', 'conflicts_with',
   'duplicate_of', 'derived_from', 'part_of',
+  'uses_resource', 'contributes_to_goal',
 ];
 
 function relevanceScore(text: string, node: TaskNode): number {
@@ -82,38 +88,66 @@ export async function analyzeNewThought(
   }
 
   const context = buildContext(newNode, allNodes, connections);
-  const userText = newNode.originalText || newNode.label;
+  const userText = sanitizeAgainstInjection(newNode.originalText || newNode.label);
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(userText, context);
+  // Каждый вызов использует свежий массив messages — контекст изолирован, нет глобального кеша ответов.
+  const messages = [
+    { role: 'system' as const, content: systemPrompt },
+    { role: 'user' as const, content: userPrompt },
+  ];
 
-  try {
-    const response = await callLLM(aiConfig, [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ], { json: true });
-    const parsed = parseAnalysisResponse(response.content);
-    return normalizeResult(parsed, newNode, allNodes, connections);
-  } catch (e) {
-    if (e instanceof LLMValidationError) {
-      const heuristic = heuristicAnalysis(newNode, allNodes, connections);
-      return { ...heuristic, reasoning: `РћС‚РІРµС‚ РјРѕРґРµР»Рё РЅРµ РїСЂРѕС€С‘Р» РІР°Р»РёРґР°С†РёСЋ: ${e.message}. РСЃРїРѕР»СЊР·РѕРІР°РЅР° СЌРІСЂРёСЃС‚РёРєР°.` };
+  // Логирование: провайдер, модель, время, ID анализируемой мысли.
+  const startTime = Date.now();
+  const tag = `[aiAgent][${newNode.id.slice(0, 8)}]`;
+
+  // Одна повторная попытка для сетевых/таймаут-ошибок. Ошибки валидации JSON
+  // не ретраятся — модель вернула контент, но он некорректен по структуре.
+  const MAX_ATTEMPTS = 2;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      console.log(`${tag} Запрос к ${aiConfig.provider}/${aiConfig.model}, попытка ${attempt}/${MAX_ATTEMPTS}`);
+      const response = await callLLM(aiConfig, messages, { json: true });
+      console.log(`${tag} Ответ получен за ${Date.now() - startTime} мс`);
+      const parsed = parseAnalysisResponse(response.content);
+      return normalizeResult(parsed, newNode, allNodes, connections);
+    } catch (e) {
+      lastError = e;
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const errType = e instanceof LLMValidationError ? 'LLMValidationError'
+        : e instanceof LLMTimeoutError ? 'LLMTimeoutError'
+        : e instanceof LLMUnavailableError ? 'LLMUnavailableError'
+        : e?.constructor?.name || 'unknown';
+      console.warn(`${tag} Ошибка (${errType}, попытка ${attempt}): ${errMsg}`);
+      if (e instanceof LLMValidationError) break;
+      if (e instanceof LLMUnavailableError || e instanceof LLMTimeoutError) {
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+      }
+      break;
     }
-    const heuristic = heuristicAnalysis(newNode, allNodes, connections);
-    return { ...heuristic, reasoning: `РњРѕРґРµР»СЊ РЅРµРґРѕСЃС‚СѓРїРЅР°: ${e instanceof Error ? e.message : 'РѕС€РёР±РєР°'}. РСЃРїРѕР»СЊР·РѕРІР°РЅР° СЌРІСЂРёСЃС‚РёРєР°.` };
   }
+
+  // Пробрасываем ошибку наверх — store сам решит, применять ли эвристику.
+  console.error(`${tag} Модель недоступна после ${Date.now() - startTime} мс`, lastError instanceof Error ? lastError.message : String(lastError));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 function buildSystemPrompt(): string {
   const schema = {
     kind: 'idea|goal|project|task|observation|question|fact|problem|decision|resource|event|habit|unknown',
-    cosmicType: 'galaxy_center|star|cluster|system|planet|satellite|asteroid|comet|blackhole',
+    cosmicType: 'galaxy_center|star|cluster|system|planet|satellite|asteroid|comet|meteor|blackhole',
     lifecycle: 'inbox|proposed|confirmed|planned|active|waiting|done|someday|archived|unknown',
     suggestedLabel: 'РєСЂР°С‚РєРѕРµ РЅР°Р·РІР°РЅРёРµ',
     suggestedDescription: 'РєРѕСЂРѕС‚РєРѕРµ РѕРїРёСЃР°РЅРёРµ',
     proposedParentId: 'ID СѓР·Р»Р° РёР· РєРѕРЅС‚РµРєСЃС‚Р° РёР»Рё null',
-    proposedRelations: [{ targetId: 'ID', relationType: 'related_to|supports|depends_on|conflicts_with|duplicate_of|derived_from|part_of', reason: 'РїРѕС‡РµРјСѓ', confidence: 0.5 }],
+    proposedRelations: [{ targetId: 'ID', relationType: 'related_to|supports|depends_on|conflicts_with|duplicate_of|derived_from|part_of|uses_resource|contributes_to_goal', reason: 'РїРѕС‡РµРјСѓ', confidence: 0.5 }],
     confidence: 0.7,
     reasoning: 'РєСЂР°С‚РєРѕРµ РѕР±РѕСЃРЅРѕРІР°РЅРёРµ',
     clarificationNeeded: false,
+claims: [{ text: 'утверждение', classification: 'factual|interpretation|guess', evidence: [{ text: 'цитата', source: 'original_text' }] }],
   };
 
   return [
@@ -127,6 +161,7 @@ function buildSystemPrompt(): string {
     '- РќРµ РїСЂРёСЃРІР°РёРІР°Р№ lifecycle="active"/"done" Р±РµР· РѕСЃРЅРѕРІР°РЅРёР№.',
     '- РќРµ РјРµРЅСЏР№ РёРµСЂР°СЂС…РёСЋ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… Р·Р°РїРёСЃРµР№. РўРѕР»СЊРєРѕ РїСЂРµРґР»РѕР¶Рё СЂРѕРґРёС‚РµР»СЏ РґР»СЏ РЅРѕРІРѕР№.',
     '',
+'- Приведи хотя бы одну цитату (поле evidence/claims) из исходного текста пользователя или описаний узлов для каждой предлагаемой связи и утверждения. Связи без цитат игнорируются.',
     'Р¤РѕСЂРјР°С‚ РѕС‚РІРµС‚Р° (С‚РѕР»СЊРєРѕ JSON):',
     JSON.stringify(schema, null, 2),
   ].join('\n');
@@ -203,9 +238,10 @@ function parseAnalysisResponse(content: string): AnalysisResult {
         relationType,
         reason: typeof rr.reason === 'string' ? rr.reason : '',
         confidence: clampConfidence(rr.confidence),
+        evidence: parseEvidence(rr.evidence),
       };
     })
-    .filter((r: unknown): r is { targetId: string; relationType: SemanticRelationType; reason: string; confidence: number } => r !== null);
+    .filter((r: unknown): r is { targetId: string; relationType: SemanticRelationType; reason: string; confidence: number; evidence?: EvidenceQuote[] } => r !== null);
 
   return {
     kind,
@@ -218,18 +254,61 @@ function parseAnalysisResponse(content: string): AnalysisResult {
     confidence,
     reasoning: typeof o.reasoning === 'string' ? o.reasoning : '',
     clarificationNeeded: !!o.clarificationNeeded,
+    claims: parseClaims(o.claims),
   };
+}
+
+function parseEvidence(raw: unknown): EvidenceQuote[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((q: unknown): q is Record<string, unknown> => typeof q === 'object' && q !== null)
+    .map((q) => {
+      const source = (['original_text', 'description', 'source_document', 'inferred'] as EvidenceSource[])
+        .includes(q.source as EvidenceSource)
+        ? (q.source as EvidenceSource)
+        : 'inferred';
+      return {
+        text: typeof q.text === 'string' ? q.text : '',
+        source,
+        position: typeof q.position === 'number' ? q.position : undefined,
+        status: ('unchecked' as ClaimStatus),
+      };
+    })
+    .filter((q) => q.text.length > 0);
+}
+
+function parseClaims(raw: unknown): Claim[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c: unknown): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+    .map((c) => {
+      const classification = (['factual', 'interpretation', 'guess'] as Claim['classification'][])
+        .includes(c.classification as Claim['classification'])
+        ? (c.classification as Claim['classification'])
+        : 'interpretation';
+      return {
+        text: typeof c.text === 'string' ? c.text : '',
+        classification,
+        supported: !!c.supported,
+        evidence: parseEvidence(c.evidence),
+      };
+    })
+    .filter((c) => c.text.length > 0);
 }
 
 function normalizeResult(
   result: AnalysisResult,
   newNode: TaskNode,
   allNodes: TaskNode[],
-  _connections: Connection[]
+  connections: Connection[]
 ): AnalysisResult {
   const validIds = new Set(allNodes.map((n) => n.id));
-  const parentId = result.proposedParentId && result.proposedParentId !== newNode.id && validIds.has(result.proposedParentId)
+  const parentCandidate = result.proposedParentId && result.proposedParentId !== newNode.id && validIds.has(result.proposedParentId)
     ? result.proposedParentId
+    : null;
+  // Запрещаем предлагать родителя, который создаст цикл в иерархии.
+  const parentId = parentCandidate && !hasHierarchyCycle(connections, parentCandidate, newNode.id)
+    ? parentCandidate
     : null;
   const seen = new Set<string>();
   const proposedRelations = result.proposedRelations.filter((r) => {
@@ -241,7 +320,7 @@ function normalizeResult(
 
   return { ...result, proposedParentId: parentId, proposedRelations };
 }
-function heuristicAnalysis(
+export function heuristicAnalysis(
   newNode: TaskNode,
   allNodes: TaskNode[],
   _connections: Connection[]
@@ -253,48 +332,56 @@ function heuristicAnalysis(
   let lifecycle: LifecycleStage = 'inbox';
   let confidence = 0.3;
 
-  if (/СЃРѕР·РґР°С‚СЊ РїСЂРёР»РѕР¶РµРЅРёРµ|СЂР°Р·СЂР°Р±РѕС‚Р°С‚СЊ|СЃРґРµР»Р°С‚СЊ (РЅР° |)РїСЂРёР»РѕР¶РµРЅРёРµ|СЃРѕР·РґР°С‚СЊ|РїРѕСЃС‚СЂРѕРёС‚СЊ|СЂРµР°Р»РёР·РѕРІР°С‚СЊ|РЅР°РїРёСЃР°С‚СЊ/.test(text)) {
+  // 1. Markers of "thought/idea" — highest priority (not project, not task).
+  if (/появилась мысль|пришла идея|пришла мысль|мысль создать|мысль сделать|\bидея\b|придумать|возможно было бы|хорошо было бы/.test(text)) {
+    kind = 'idea';
+    cosmicType = 'meteor';
+    confidence = 0.6;
+  }
+  // 2. "Want X" (receive/earn/achieve) — a goal, not a task.
+  else if (/хочу\s+(получать|зарабатывать|иметь|купить|достичь|добиться|освоить|научиться|изучить)/.test(text)) {
+    kind = 'goal';
+    cosmicType = 'system';
+    confidence = 0.6;
+  }
+  // 3. Project (creation/development).
+  else if (/создать приложение|разработать|сделать (на |)приложение|создать|построить|реализовать|написать/.test(text)) {
     kind = 'project';
     cosmicType = 'star';
     confidence = 0.6;
-  } else if (/РґРѕР»Р¶РµРЅ|РЅСѓР¶РЅРѕ|РЅРµРѕР±С…РѕРґРёРјРѕ|СЃРґРµР»Р°С‚СЊ|СЂРµР°Р»РёР·РѕРІР°С‚СЊ|РІС‹РїРѕР»РЅРёС‚СЊ|Р·Р°РґР°С‡Р°|СЃСЂРѕС‡РЅРѕ|РЅР°РґРѕ/.test(text)) {
+  } else if (/должен|нужно|необходимо|сделать|реализовать|выполнить|задача|срочно|надо/.test(text)) {
     kind = 'task';
     cosmicType = 'planet';
     confidence = 0.55;
-  } else if (/РёРґРµСЏ|РїСЂРёРґСѓРјР°С‚СЊ|РІРѕР·РјРѕР¶РЅРѕ Р±С‹Р»Рѕ Р±С‹|С…РѕСЂРѕС€Рѕ Р±С‹Р»Рѕ Р±С‹/.test(text)) {
-    kind = 'idea';
-    cosmicType = 'comet';
-    confidence = 0.5;
-  } else if (/\?|РёРЅС‚РµСЂРµСЃРЅРѕ|РЅРµ РїРѕРЅРёРјР°СЋ|РїРѕС‡РµРјСѓ|РєР°Рє/.test(text)) {
+  } else if (/\?|интересно|не понимаю|почему|как/.test(text)) {
     kind = 'question';
     cosmicType = 'asteroid';
     confidence = 0.45;
-  } else if (/РїСЂРѕР±Р»РµРјР°|РЅРµ СЂР°Р±РѕС‚Р°РµС‚|РѕС€РёР±РєР°|СЃР»РѕРјР°РЅ|Р±Р°Рі|Р·Р°СЃС‚СЂРµРІР°РµС‚/.test(text)) {
+  } else if (/проблема|не работает|ошибка|сломан|баг|застревает/.test(text)) {
     kind = 'problem';
     cosmicType = 'blackhole';
     confidence = 0.6;
-  } else if (/С„Р°РєС‚|РёР·РІРµСЃС‚РЅРѕ|СѓСЃС‚Р°РЅРѕРІР»РµРЅРѕ|Р·Р°РєРѕРЅ|РїСЂР°РІРёР»Рѕ/.test(text)) {
+  } else if (/факт|известно|установлено|закон|правило/.test(text)) {
     kind = 'fact';
     cosmicType = 'planet';
     confidence = 0.5;
-  } else if (/С†РµР»СЊ|РґРѕР±РёС‚СЊСЃСЏ|РґРѕСЃС‚РёС‡СЊ|С…РѕС‡Сѓ РґРѕСЃС‚РёРіРЅСѓС‚СЊ/.test(text)) {
+  } else if (/цель|добиться|достичь|хочу достигнуть/.test(text)) {
     kind = 'goal';
     cosmicType = 'star';
     confidence = 0.55;
-  } else if (/Р·Р°РІС‚СЂР°|СЃРµРіРѕРґРЅСЏ|СЃРѕР±С‹С‚РёРµ|РІСЃС‚СЂРµС‡Р°|РґР°С‚Р°|РїРѕРЅРµРґРµР»СЊРЅРёРє|РІС‚РѕСЂРЅРёРє|СЃСЂРµРґР°|С‡РµС‚РІРµСЂРі|РїСЏС‚РЅРёС†Р°|СЃСѓР±Р±РѕС‚Р°|РІРѕСЃРєСЂРµСЃРµРЅСЊРµ/.test(text)) {
+  } else if (/завтра|сегодня|событие|встреча|дата|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье/.test(text)) {
     kind = 'event';
     cosmicType = 'comet';
     confidence = 0.5;
-  } else if (/РїСЂРёРІС‹С‡РєР°|РµР¶РµРґРЅРµРІРЅРѕ|РєР°Р¶РґС‹Р№ РґРµРЅСЊ|СЂРµРіСѓР»СЏСЂРЅРѕ|РїРѕРІС‚РѕСЂСЏС‚СЊ/.test(text)) {
+  } else if (/привычка|ежедневно|каждый день|регулярно|повторять/.test(text)) {
     kind = 'habit';
     cosmicType = 'satellite';
     confidence = 0.6;
-  } else if (/РЅР°Р±Р»СЋРґРµРЅРёРµ|Р·Р°РјРµС‚РёР»|Р·Р°РјРµС‡Р°СЋ|РІРёР¶Сѓ С‡С‚Рѕ/.test(text)) {
+  } else if (/наблюдение|заметил|замечаю|вижу что/.test(text)) {
     kind = 'observation';
     cosmicType = 'asteroid';
     confidence = 0.5;
   }
-
   let proposedParentId: string | null = null;
   const tokens = text.split(/[^a-zР°-СЏС‘0-9]+/).filter((t) => t.length > 2);
   let bestScore = -1;
@@ -345,6 +432,85 @@ function heuristicAnalysis(
     confidence,
     reasoning: 'Р­РІСЂРёСЃС‚РёС‡РµСЃРєРёР№ Р°РЅР°Р»РёР· СЃ РїСЂР°РІРёР»Р°РјРё (Р±РµР· РїРѕРґРєР»СЋС‡С‘РЅРЅРѕР№ РР-РјРѕРґРµР»Рё)',
     clarificationNeeded: confidence < 0.4,
+  };
+}
+
+
+/** Lightweight pre-classification called immediately on thought save.
+ * Returns only kind/cosmicType/lifecycle/confidence — no relations.
+ * Never returns 'confirmed' lifecycle. */
+export function preliminaryClassify(originalText: string): {
+  kind: SemanticKind;
+  cosmicType: NodeStatus;
+  lifecycle: LifecycleStage;
+  confidence: number;
+} {
+  const text = originalText.toLowerCase();
+  let kind: SemanticKind = 'unknown';
+  let cosmicType: NodeStatus = 'asteroid';
+  let confidence = 0.3;
+
+  if (/появилась мысль|пришла идея|пришла мысль|мысль создать|мысль сделать|\bидея\b|придумать|возможно было бы|хорошо было бы/.test(text)) {
+    kind = 'idea';
+    cosmicType = 'meteor';
+    confidence = 0.6;
+  }
+  else if (/хочу\s+(получать|зарабатывать|иметь|купить|достичь|добиться|освоить|научиться|изучить)/.test(text)) {
+    kind = 'goal';
+    cosmicType = 'system';
+    confidence = 0.6;
+  }
+  else if (/создать приложение|разработать|сделать (на |)приложение|создать|построить|реализовать|написать/.test(text)) {
+    kind = 'project';
+    cosmicType = 'star';
+    confidence = 0.6;
+  }
+  else if (/должен|нужно|необходимо|сделать|реализовать|выполнить|задача|срочно|надо/.test(text)) {
+    kind = 'task';
+    cosmicType = 'planet';
+    confidence = 0.55;
+  }
+  else if (/\?|интересно|не понимаю|почему|как/.test(text)) {
+    kind = 'question';
+    cosmicType = 'asteroid';
+    confidence = 0.45;
+  }
+  else if (/проблема|не работает|ошибка|сломан|баг|застревает/.test(text)) {
+    kind = 'problem';
+    cosmicType = 'blackhole';
+    confidence = 0.6;
+  }
+  else if (/факт|известно|установлено|закон|правило/.test(text)) {
+    kind = 'fact';
+    cosmicType = 'planet';
+    confidence = 0.5;
+  }
+  else if (/цель|добиться|достичь|хочу достигнуть/.test(text)) {
+    kind = 'goal';
+    cosmicType = 'star';
+    confidence = 0.55;
+  }
+  else if (/завтра|сегодня|событие|встреча|дата|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье/.test(text)) {
+    kind = 'event';
+    cosmicType = 'comet';
+    confidence = 0.5;
+  }
+  else if (/привычка|ежедневно|каждый день|регулярно|повторять/.test(text)) {
+    kind = 'habit';
+    cosmicType = 'satellite';
+    confidence = 0.6;
+  }
+  else if (/наблюдение|заметил|замечаю|вижу что/.test(text)) {
+    kind = 'observation';
+    cosmicType = 'asteroid';
+    confidence = 0.5;
+  }
+
+  return {
+    kind,
+    cosmicType,
+    lifecycle: 'inbox' as LifecycleStage,
+    confidence,
   };
 }
 

@@ -32,7 +32,7 @@ export default function TaskSphere({ node }: TaskSphereProps) {
   const isDimmed = focusMode && selectedNodeId && !isSelected && !isConnected;
   
   const color = node.color;
-  const emissiveIntensity = hovered || isSelected ? 0.8 : 0.3;
+  const emissiveIntensity = hovered || isSelected ? 0.5 : 0.15;
   const scale = hovered || isSelected ? 1.1 : 1;
   const opacity = isDimmed ? 0.3 : 1;
 
@@ -163,6 +163,28 @@ export default function TaskSphere({ node }: TaskSphereProps) {
         </group>
       )}
 
+      {/* Meteor: brief faint trail (мимолётная мысль) */}
+      {node.status === 'meteor' && (
+        <group>
+          <mesh position={[node.size * -0.9, node.size * 0.2, 0]}>
+            <sphereGeometry args={[node.size * 0.18, 12, 12]} />
+            <meshBasicMaterial
+              color="#94a3b8"
+              transparent
+              opacity={(hovered || isSelected ? 0.4 : 0.15) * opacity}
+            />
+          </mesh>
+          <mesh position={[node.size * -1.5, node.size * 0.35, 0]}>
+            <sphereGeometry args={[node.size * 0.12, 8, 8]} />
+            <meshBasicMaterial
+              color="#64748b"
+              transparent
+              opacity={(hovered || isSelected ? 0.25 : 0.08) * opacity}
+            />
+          </mesh>
+        </group>
+      )}
+
       {/* Black hole effect */}
       {node.status === 'blackhole' && (
         <Sphere args={[node.size * 1.2, 32, 32]}>
@@ -197,7 +219,7 @@ export default function TaskSphere({ node }: TaskSphereProps) {
             userSelect: 'none',
           }}
         >
-          <div className="bg-black/80 backdrop-blur-md border border-white/20 rounded-lg px-3 py-1.5 whitespace-nowrap shadow-xl">
+          <div className="bg-black/70 border border-white/15 rounded-md px-2.5 py-1 whitespace-nowrap">
             <div className="flex items-center gap-1.5">
               <span className="text-xs">
                 {node.status === 'galaxy_center' ? '🌌' : 
@@ -207,6 +229,7 @@ export default function TaskSphere({ node }: TaskSphereProps) {
                  node.status === 'planet' ? '🪐' : 
                  node.status === 'satellite' ? '🛰️' : 
                  node.status === 'comet' ? '☄️' : 
+                 node.status === 'meteor' ? '🌠' : 
                  node.status === 'blackhole' ? '🕳️' : '🪨'}
               </span>
               <span className="text-white text-xs font-medium">{node.label}</span>

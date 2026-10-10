@@ -35,7 +35,24 @@ export class LLMUnavailableError extends Error {}
 export class LLMValidationError extends Error {}
 export class LLMTimeoutError extends Error {}
 
-const TIMEOUT_MS = 30000;
+/**
+ * Защита от prompt-injection: нейтрализует попытки пользовательского текста
+ * «вырваться» из роли данных и дать инструкции модели. Используется перед
+ * подстановкой пользовательского контента в промпт.
+ */
+export function sanitizeAgainstInjection(text: string): string {
+  if (!text) return text;
+  return text
+    // Убираем явные «инструкциональные» маркеры
+    .replace(/(^|\n)\s*(ignore|forget|disregard|override|system\s*:|assistant\s*:|your\s+instructions)/gi, '$1')
+    // Убираем попытки задать новый системный блок
+    .replace(/<\|(system|user|assistant)\|>/gi, '')
+    .replace(/\[(system|user|assistant)\]/gi, '')
+    // Ограничиваем длину контента, попадающего в промпт
+    .slice(0, 8000);
+}
+
+const TIMEOUT_MS = 60000;
 
 async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
@@ -102,21 +119,84 @@ async function callOllama(
       body: JSON.stringify(body),
     });
   } catch (e) {
+    // Различаем таймаут и сетевую ошибку подключения.
+    if (e instanceof LLMTimeoutError) throw e;
+    const detail = e instanceof Error ? e.message : 'сетевая ошибка';
     throw new LLMUnavailableError(
-      `Не удалось подключиться к Ollama (${endpoint}): ${e instanceof Error ? e.message : 'сетевая ошибка'}`
+      `Не удалось подключиться к Ollama (${endpoint}). Проверьте, что сервер запущен и OLLAMA_ORIGINS разрешает этот источник. Детали: ${detail}`
     );
   }
 
   if (!response.ok) {
-    throw new LLMUnavailableError(`Ollama вернул ошибку HTTP ${response.status}`);
+    let bodyText = '';
+    try { bodyText = (await response.text()).slice(0, 300); } catch { /* ignore */ }
+    throw new LLMUnavailableError(
+      `Ollama вернул ошибку HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}${bodyText ? `: ${bodyText}` : ''}`
+    );
   }
 
-  const data = await response.json();
-  const content = data?.message?.content;
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (e) {
+    throw new LLMValidationError(
+      `Ollama вернул ответ, который не удалось разобрать как JSON: ${e instanceof Error ? e.message : 'ошибка парсинга'}`
+    );
+  }
+  const content = (data as { message?: { content?: unknown } })?.message?.content;
   if (typeof content !== 'string' || !content) {
-    throw new LLMValidationError('Ollama вернул пустой или некорректный ответ');
+    throw new LLMValidationError('Ollama вернул пустой или некорректный ответ (нет message.content)');
   }
   return { content, provider: 'ollama', isDemo: false };
+}
+
+/**
+ * Диагностика подключения к Ollama.
+ * Возвращает структурированный результат без выбрасывания исключений —
+ * удобно для отображения в настройках и для логирования.
+ */
+export async function checkOllamaHealth(endpoint: string): Promise<{
+  ok: boolean;
+  endpoint: string;
+  models?: string[];
+  error?: string;
+  errorType?: 'config' | 'connection' | 'timeout' | 'http' | 'json';
+}> {
+  let resolved: string;
+  try {
+    resolved = resolveEndpoint(endpoint);
+  } catch (e) {
+    return { ok: false, endpoint, error: e instanceof Error ? e.message : 'Endpoint не задан', errorType: 'config' };
+  }
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(`${resolved}/api/tags`, { method: 'GET' });
+  } catch (e) {
+    if (e instanceof LLMTimeoutError) {
+      return { ok: false, endpoint: resolved, error: 'Превышено время ожидания ответа Ollama', errorType: 'timeout' };
+    }
+    return {
+      ok: false,
+      endpoint: resolved,
+      error: `Не удалось подключиться: ${e instanceof Error ? e.message : 'сетевая ошибка'}. Проверьте OLLAMA_ORIGINS.`,
+      errorType: 'connection',
+    };
+  }
+
+  if (!response.ok) {
+    return { ok: false, endpoint: resolved, error: `HTTP ${response.status} ${response.statusText || ''}`.trim(), errorType: 'http' };
+  }
+
+  try {
+    const data = (await response.json()) as { models?: Array<{ name?: string }> };
+    const models = Array.isArray(data?.models)
+      ? data.models.map((m) => m?.name).filter((n): n is string => typeof n === 'string')
+      : [];
+    return { ok: true, endpoint: resolved, models };
+  } catch (e) {
+    return { ok: false, endpoint: resolved, error: `Некорректный JSON: ${e instanceof Error ? e.message : 'ошибка'}`, errorType: 'json' };
+  }
 }
 
 async function callOpenAICompatible(
